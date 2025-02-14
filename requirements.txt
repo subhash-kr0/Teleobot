@@ -2,3 +2,5 @@ python-dotenv
 aiogram
 openai
 dotenv
+telegram
+requests

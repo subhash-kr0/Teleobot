@@ -1,93 +1,94 @@
-from dotenv import load_dotenv
 import os
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message
-from aiogram.filters import Command
-import asyncio
-import openai
-
-class Reference:
-    """
-    A class to store previous responses from the chatGPT API.
-    """
-    def __init__(self) -> None:
-        self.response = ""
+import logging
+import requests
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
 # Load environment variables
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
-reference = Reference()
-TOKEN = os.getenv("BOT_TOKEN")
+# Configuration
+TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "deepseek/deepseek-r1:free"
 
-# Model name
-MODEL_NAME = "gpt-4o-mini"
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Initialize bot and router
-bot = Bot(token=TOKEN)
-router = Router()  # Aiogram 3.x uses Router for handlers
-dp = Dispatcher()
+# Dictionary to store conversation history
+user_conversations = {}
 
-def clear_past():
-    """Clear the previous conversation and context."""
-    reference.response = ""
+async def start(update: Update, context: CallbackContext):
+    """Send welcome message when /start is issued"""
+    user_id = update.message.chat_id
+    user_conversations[user_id] = []  # Initialize conversation for the user
 
-@router.message(Command("start"))
-async def welcome(message: Message):
-    """
-    This handler receives messages with the `/start` command.
-    """
-    await message.answer("Hi\nI am Tele Bot!\nCreated by Bappy. How can I assist you?")
-
-@router.message(Command("clear"))
-async def clear(message: Message):
-    """
-    A handler to clear the previous conversation and context.
-    """
-    clear_past()
-    await message.answer("I've cleared the past conversation and context.")
-
-@router.message(Command("help"))
-async def helper(message: Message):
-    """
-    A handler to display the help menu.
-    """
-    help_command = (
-        "Hi there, I'm a chatGPT Telegram bot created by Bappy!\n"
-        "Please follow these commands:\n"
-        "/start - Start the conversation\n"
-        "/clear - Clear the past conversation and context\n"
-        "/help - Display this help menu\n"
-        "I hope this helps. :)"
+    await update.message.reply_text(
+        "🤖 Hello! I'm an AI assistant powered by OpenRouter. Ask me anything!\n\n"
+        f"⚙️ Current model: {DEFAULT_MODEL}"
     )
-    await message.answer(help_command)
 
-@router.message(F.text)
-async def chatgpt(message: Message):
-    """
-    A handler to process the user's input and generate a response using the chatGPT API.
-    """
-    print(f"USER: {message.text}")
+async def handle_message(update: Update, context: CallbackContext):
+    """Handle incoming messages and generate responses using OpenRouter"""
     try:
-        response = openai.ChatCompletion.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "assistant", "content": reference.response},
-                {"role": "user", "content": message.text},
-            ]
-        )
-        reference.response = response['choices'][0]['message']['content']
-        print(f"chatGPT: {reference.response}")
-        await message.answer(reference.response)
-    except Exception as e:
-        error_message = "An error occurred while processing your request. Please try again later."
-        print(f"Error: {e}")
-        await message.answer(error_message)
+        user_id = update.message.chat_id
+        user_message = update.message.text
 
-async def main():
-    dp.include_router(router)
-    await bot.delete_webhook(drop_pending_updates=True)  # Ensures no old updates interfere
-    await dp.start_polling(bot)
+        # Maintain conversation history (last 5 messages)
+        if user_id not in user_conversations:
+            user_conversations[user_id] = []
+        user_conversations[user_id].append({"role": "user", "content": user_message})
+        user_conversations[user_id] = user_conversations[user_id][-5:]  # Keep last 5 messages
+
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://github.com/subhash-kr0",  
+            "X-Title": "Your Bot Name",
+        }
+
+        payload = {
+            "model": DEFAULT_MODEL,
+            "messages": user_conversations[user_id],
+            "temperature": 0.7,
+            "max_tokens": 500  # Reduce token usage for efficiency
+        }
+
+        # Make API request to OpenRouter
+        response = requests.post(OPENROUTER_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        # Extract and send response
+        ai_response = response.json()['choices'][0]['message']['content']
+
+        # Store AI response in conversation history
+        user_conversations[user_id].append({"role": "assistant", "content": ai_response})
+        user_conversations[user_id] = user_conversations[user_id][-5:]  # Keep last 5 messages
+
+        await update.message.reply_text(ai_response)
+
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+        await update.message.reply_text("⚠️ Sorry, I encountered an error processing your request.")
+
+def main():
+    """Start the bot"""
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Register handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Start the bot
+    logger.info("Bot is running...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
+
